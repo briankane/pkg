@@ -18,28 +18,48 @@ package runtime
 
 import (
 	"context"
+	"errors"
+	"k8s.io/client-go/tools/record"
+	"k8s.io/klog/v2"
+	controllerruntime "sigs.k8s.io/controller-runtime"
+	"sync"
 	"time"
 
 	"cuelang.org/go/cue/build"
+	"github.com/kubevela/pkg/apis/cue/v1alpha1"
+	"github.com/kubevela/pkg/util/k8s"
+	"github.com/kubevela/pkg/util/maps"
+	"github.com/kubevela/pkg/util/singleton"
+	"github.com/kubevela/pkg/util/slices"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	apiruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/dynamic/dynamicinformer"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/klog/v2"
-
-	"github.com/kubevela/pkg/apis/cue/v1alpha1"
-	"github.com/kubevela/pkg/util/k8s"
-	"github.com/kubevela/pkg/util/maps"
-	"github.com/kubevela/pkg/util/singleton"
-	"github.com/kubevela/pkg/util/slices"
 )
 
 const defaultResyncPeriod = 5 * time.Minute
 
+var (
+	recorder        record.EventRecorder
+	recorderOnce    sync.Once
+	packageManagers = make(map[string]*PackageManager)
+	mu              sync.Mutex
+)
+
+// SetupPackagesEventRecorder ...
+func SetupPackagesEventRecorder(mgr controllerruntime.Manager) error {
+	r := mgr.GetEventRecorderFor("package-manager")
+	recorderOnce.Do(func() {
+		recorder = r
+	})
+	return nil
+}
+
 // PackageManager manages cue packages
 type PackageManager struct {
+	Name      string
 	Internals *maps.SyncMap[string, Package]
 	Externals *maps.SyncMap[string, Package]
 
@@ -71,8 +91,16 @@ func (in WithInternalPackage) ApplyTo(m *PackageManager) {
 }
 
 // NewPackageManager create PackageManager with given options
-func NewPackageManager(opts ...PackageManagerOption) *PackageManager {
+func NewPackageManager(name string, opts ...PackageManagerOption) (*PackageManager, error) {
+	mu.Lock()
+	defer mu.Unlock()
+
+	if _, exists := packageManagers[name]; exists {
+		return nil, errors.New("PackageManager with this name already exists")
+	}
+
 	m := &PackageManager{
+		Name:         name,
 		Internals:    maps.NewSyncMap[string, Package](),
 		Externals:    maps.NewSyncMap[string, Package](),
 		ResyncPeriod: defaultResyncPeriod,
@@ -80,7 +108,8 @@ func NewPackageManager(opts ...PackageManagerOption) *PackageManager {
 	for _, opt := range opts {
 		opt.ApplyTo(m)
 	}
-	return m
+	packageManagers[name] = m
+	return m, nil
 }
 
 func (in *PackageManager) getExternalPackageID(pkg *v1alpha1.Package) string {
@@ -114,6 +143,9 @@ func (in *PackageManager) LoadExternalPackages(ctx context.Context) error {
 			return err
 		}
 		in.setExternalPackage(_pkg)
+		if recorder != nil {
+			recorder.Eventf(_pkg, "eventtype", "reason", "message")
+		}
 	}
 	return nil
 }
@@ -175,4 +207,10 @@ func (in *PackageManager) GetProviders() map[string]Provider {
 		m[pkg.GetName()] = pkg
 	}
 	return m
+}
+
+func (in *PackageManager) AddPackageEvent(pkg *v1alpha1.Package, eventType string, reason string, event string) {
+	if recorder != nil {
+		recorder.Event(pkg, eventType, reason, event)
+	}
 }

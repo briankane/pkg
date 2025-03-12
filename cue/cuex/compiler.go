@@ -184,9 +184,28 @@ func (in *Compiler) Resolve(ctx context.Context, value cue.Value) (cue.Value, er
 	return newValue, nil
 }
 
+func NewCompiler(name string, packages ...cuexruntime.Package) (*Compiler, error) {
+	pm, err := cuexruntime.NewPackageManager(name,
+		slices.Map(packages, func(p cuexruntime.Package) cuexruntime.PackageManagerOption {
+			return cuexruntime.WithInternalPackage{Package: p}
+		})...,
+	)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return &Compiler{
+		PackageManager: pm,
+	}, nil
+}
+
 // DefaultCompiler compiler for cuex to compile
 var DefaultCompiler = singleton.NewSingleton[*Compiler](func() *Compiler {
-	compiler := NewCompilerWithDefaultInternalPackages()
+	compiler, err := NewCompilerWithDefaultInternalPackages()
+	if err != nil {
+		klog.Errorf("error loading compiler %s: %v", compiler.Name, err)
+	}
 	if EnableExternalPackageForDefaultCompiler {
 		if err := compiler.LoadExternalPackages(context.Background()); err != nil && !kerrors.IsNotFound(err) {
 			klog.Errorf("failed to load external packages for cuex default compiler: %s", err.Error())
@@ -199,19 +218,13 @@ var DefaultCompiler = singleton.NewSingleton[*Compiler](func() *Compiler {
 })
 
 // NewCompilerWithInternalPackages create compiler with internal packages
-func NewCompilerWithInternalPackages(packages ...cuexruntime.Package) *Compiler {
-	return &Compiler{
-		PackageManager: cuexruntime.NewPackageManager(
-			slices.Map(packages, func(p cuexruntime.Package) cuexruntime.PackageManagerOption {
-				return cuexruntime.WithInternalPackage{Package: p}
-			})...,
-		),
-	}
+func NewCompilerWithInternalPackages(name string, packages ...cuexruntime.Package) (*Compiler, error) {
+	return NewCompiler(name, packages...)
 }
 
 // NewCompilerWithDefaultInternalPackages create compiler with default internal packages
-func NewCompilerWithDefaultInternalPackages() *Compiler {
-	return NewCompilerWithInternalPackages(
+func NewCompilerWithDefaultInternalPackages() (*Compiler, error) {
+	return NewCompilerWithInternalPackages("default-internal-packages",
 		base64.Package,
 		http.Package,
 		kube.Package,
