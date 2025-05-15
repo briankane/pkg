@@ -18,6 +18,12 @@ package cuex
 
 import (
 	"context"
+	"github.com/kubevela/pkg/cue/cuex/providers/base64"
+	cueext "github.com/kubevela/pkg/cue/cuex/providers/cue"
+	"github.com/kubevela/pkg/cue/cuex/providers/http"
+	"github.com/kubevela/pkg/cue/cuex/providers/kube"
+	"github.com/kubevela/pkg/util/slices"
+	"github.com/pkg/errors"
 	"strings"
 	"time"
 
@@ -29,15 +35,10 @@ import (
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/klog/v2"
 
-	"github.com/kubevela/pkg/cue/cuex/providers/base64"
-	cueext "github.com/kubevela/pkg/cue/cuex/providers/cue"
-	"github.com/kubevela/pkg/cue/cuex/providers/http"
-	"github.com/kubevela/pkg/cue/cuex/providers/kube"
 	cuexruntime "github.com/kubevela/pkg/cue/cuex/runtime"
 	"github.com/kubevela/pkg/cue/util"
 	"github.com/kubevela/pkg/util/runtime"
 	"github.com/kubevela/pkg/util/singleton"
-	"github.com/kubevela/pkg/util/slices"
 )
 
 const (
@@ -150,36 +151,83 @@ func (in *Compiler) Resolve(ctx context.Context, value cue.Value) (cue.Value, er
 			return newValue, ResolveTimeoutErr{}
 		}
 		var next *cue.Value
+
 		// 1. find the next to execute
 		util.Iterate(newValue, func(v cue.Value) (stop bool) {
 			_, done := executed[v.Path().String()]
-			fn, _ := v.LookupPath(cue.ParsePath(doKey)).String()
-			if !done && fn != "" {
-				next = &v
-				return true
+			do := v.LookupPath(cue.ParsePath(doKey))
+
+			switch do.IncompleteKind() {
+			case cue.StringKind:
+				fn, _ := do.String()
+				if !done && fn != "" {
+					next = &v
+					return true
+				}
+			case cue.StructKind:
+				outputField := do.LookupPath(cue.ParsePath("$returns"))
+				if !done && outputField.Exists() {
+					next = &v
+					return true
+				}
 			}
 			return false
 		})
 		if next == nil {
 			break
 		}
+
 		// 2. execute
-		fn, _ := next.LookupPath(cue.ParsePath(doKey)).String()
-		prdName, _ := next.LookupPath(cue.ParsePath(providerKey)).String()
-		prd, found := providers[prdName]
-		if !found {
-			return newValue, ProviderNotFoundErr(prdName)
-		}
-		f := prd.GetProviderFn(fn)
-		if f == nil {
-			return newValue, ProviderFnNotFoundErr{Provider: prdName, Fn: fn}
-		}
-		val, err := f.Call(ctx, *next)
-		if err != nil {
-			return newValue, NewFunctionCallError(val, err)
-		}
-		newValue = newValue.FillPath(next.Path(), val)
 		executed[next.Path().String()] = true
+		do := next.LookupPath(cue.ParsePath(doKey))
+		switch do.IncompleteKind() {
+		case cue.StringKind:
+			fn, _ := do.String()
+			prdName, _ := next.LookupPath(cue.ParsePath(providerKey)).String()
+			prd, found := providers[prdName]
+			if !found {
+				return newValue, ProviderNotFoundErr(prdName)
+			}
+			f := prd.GetProviderFn(fn)
+			if f == nil {
+				return newValue, ProviderFnNotFoundErr{Provider: prdName, Fn: fn}
+			}
+			val, err := f.Call(ctx, *next)
+			if err != nil {
+				return newValue, NewFunctionCallError(val, err)
+			}
+			newValue = newValue.FillPath(next.Path(), val)
+			executed[next.Path().String()] = true
+		case cue.StructKind:
+			val := *next
+
+			params := val.LookupPath(cue.ParsePath("$params"))
+			if !params.Exists() {
+				return newValue, NewFunctionCallError(val, errors.New("inline function missing $params"))
+			}
+
+			returns := val.LookupPath(cue.ParsePath("$returns"))
+			if !params.Exists() {
+				return newValue, NewFunctionCallError(val, errors.New("inline function missing $returns"))
+			}
+
+			workspace := val.Context().CompileString("")
+			for _, field := range []string{"parameter"} {
+				fieldValue := value.LookupPath(cue.ParsePath(field))
+				if fieldValue.Exists() {
+					workspace = workspace.FillPath(cue.ParsePath("$"+field), fieldValue)
+				}
+			}
+			workspace = workspace.FillPath(cue.ParsePath("#do"), do)
+			workspace = workspace.FillPath(cue.ParsePath("#do.$params"), params)
+			workspace = workspace.FillPath(cue.ParsePath("#do.$returns"), returns)
+			workspace = workspace.Eval()
+
+			returnVal := workspace.LookupPath(cue.ParsePath("#do.$returns"))
+			val = val.FillPath(cue.ParsePath("$returns"), returnVal)
+
+			newValue = newValue.FillPath(next.Path(), val)
+		}
 	}
 	return newValue, nil
 }

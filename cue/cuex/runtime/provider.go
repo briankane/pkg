@@ -126,3 +126,36 @@ type NativeProviderFn func(context.Context, cue.Value) (cue.Value, error)
 func (fn NativeProviderFn) Call(ctx context.Context, value cue.Value) (cue.Value, error) {
 	return fn(ctx, value)
 }
+
+// InlineProviderFn .
+type InlineProviderFn struct {
+	fnSpec cue.Value
+}
+
+func NewInlineProviderFn(fnSpec cue.Value) *InlineProviderFn {
+	return &InlineProviderFn{fnSpec}
+}
+
+// Call .
+func (fn InlineProviderFn) Call(ctx context.Context, val cue.Value) (cue.Value, error) {
+	//params := val.LookupPath(cue.ParsePath("$params"))
+	//if !params.Exists() {
+	//	return val, cuex.NewFunctionCallError(val, errors.New("inline function missing $params"))
+	//}
+	//
+	//injected := fn.fnSpec.FillPath(cue.ParsePath("$params"), params)
+	//err = injected.Validate(cue.Concrete(true))
+	//if err != nil {
+	//	return newValue, NewFunctionCallError(injected, err)
+	//}
+	//returns := injected.LookupPath(cue.ParsePath("$returns"))
+	//if !returns.Exists() {
+	//	return newValue, NewFunctionCallError(injected, errors.New("no returns provided in fn"))
+	//}
+	//if err := returns.Validate(cue.Concrete(true)); err != nil {
+	//	return newValue, NewFunctionCallError(returns, errors.Wrap(err, "$returns is not concrete"))
+	//}
+	//next = next.FillPath(cue.ParsePath("$returns"), returns)
+	//newValue = newValue.FillPath(next.Path(), val)
+	return val, nil
+}

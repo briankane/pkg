@@ -18,7 +18,13 @@ package cuex_test
 
 import (
 	"context"
+	"cuelang.org/go/pkg/strings"
 	"fmt"
+	"github.com/kubevela/pkg/util/singleton"
+	"github.com/stretchr/testify/assert"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"testing"
 	"time"
 
@@ -167,4 +173,233 @@ func TestWithExtraData(t *testing.T) {
 			cuex.NewCompileConfig(cuex.WithExtraData(name, tt))
 		})
 	}
+}
+
+func TestInlineDoFunctionExecution(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("basic string", func(t *testing.T) {
+		compiler := cuex.NewCompilerWithDefaultInternalPackages()
+		code := strings.TrimSpace(`
+			import "strings"
+
+			parameter: {
+				cluster: "cluster-1"
+			}
+
+			#Fn: {
+				#do: {
+					$returns: strings.ToUpper("\(parameter.cluster)-\($params.input)")
+				}
+				$params: {
+					input: string
+				}
+				$returns: string
+			}
+
+			result: #Fn & {
+              $params: {
+                input: "test"
+              }
+            }
+		`)
+		val, err := compiler.CompileString(ctx, code)
+		require.NoError(t, err)
+
+		out := val.LookupPath(cue.ParsePath("result.$returns"))
+		s, err := out.String()
+		require.NoError(t, err)
+		require.Equal(t, "CLUSTER-1-TEST", s)
+	})
+
+	t.Run("read from package", func(t *testing.T) {
+		packagePath := "test/ext"
+		packageObj := &unstructured.Unstructured{
+			Object: map[string]interface{}{
+				"apiVersion": "cue.oam.dev/v1alpha1",
+				"kind":       "Package",
+				"metadata": map[string]interface{}{
+					"name":      "test-package",
+					"namespace": "default",
+				},
+				"spec": map[string]interface{}{
+					"path": packagePath,
+					"provider": map[string]interface{}{
+						"endpoint": "",
+						"protocol": "",
+					},
+					"templates": map[string]interface{}{
+						"test/ext": strings.TrimSpace(`
+							package ext
+
+							import "strings"
+
+							#Fn: {
+								#do: {
+									$returns: strings.ToUpper($params.input)
+								}
+								$params: {
+									input: string
+								}
+								$returns: string
+							}
+						`),
+					},
+				},
+			},
+		}
+		cl := fake.NewClientBuilder().Build()
+		dcl := dynamicfake.NewSimpleDynamicClient(kuberuntime.NewScheme(), packageObj)
+		singleton.KubeClient.Set(cl)
+		singleton.DynamicClient.Set(dcl)
+
+		compiler := cuex.NewCompilerWithDefaultInternalPackages()
+		err := compiler.LoadExternalPackages(context.Background())
+		assert.NoError(t, err)
+
+		cuex.DefaultCompiler.Reload()
+		defer singleton.ReloadClients()
+		defer cuex.DefaultCompiler.Reload()
+
+		tmpl := strings.TrimSpace(`
+			import "test/ext"
+
+			result: ext.#Fn & {
+              $params: {
+                input: "test"
+              }
+            }
+		`)
+
+		val, err := compiler.CompileString(ctx, tmpl)
+		require.NoError(t, err)
+
+		out := val.LookupPath(cue.ParsePath("result.$returns"))
+		s, err := out.String()
+		require.NoError(t, err)
+		require.Equal(t, "TEST", s)
+	})
+
+	t.Run("read from package", func(t *testing.T) {
+		packagePath := "test/ext"
+		packageObj := &unstructured.Unstructured{
+			Object: map[string]interface{}{
+				"apiVersion": "cue.oam.dev/v1alpha1",
+				"kind":       "Package",
+				"metadata": map[string]interface{}{
+					"name":      "test-package",
+					"namespace": "default",
+				},
+				"spec": map[string]interface{}{
+					"path": packagePath,
+					"provider": map[string]interface{}{
+						"endpoint": "",
+						"protocol": "",
+					},
+					"templates": map[string]interface{}{
+						"test/ext": strings.TrimSpace(`
+							package ext
+
+							import "strings"
+
+							#Fn: {
+								in: string
+								out: strings.ToUpper(in)
+							}
+						`),
+					},
+				},
+			},
+		}
+		cl := fake.NewClientBuilder().Build()
+		dcl := dynamicfake.NewSimpleDynamicClient(kuberuntime.NewScheme(), packageObj)
+		singleton.KubeClient.Set(cl)
+		singleton.DynamicClient.Set(dcl)
+
+		compiler := cuex.NewCompilerWithDefaultInternalPackages()
+		err := compiler.LoadExternalPackages(context.Background())
+		assert.NoError(t, err)
+
+		cuex.DefaultCompiler.Reload()
+		defer singleton.ReloadClients()
+		defer cuex.DefaultCompiler.Reload()
+
+		tmpl := strings.TrimSpace(`
+			import "test/ext"
+
+			result: ext.#Fn & {
+              in: "hello"
+            }
+		`)
+
+		val, err := compiler.CompileString(ctx, tmpl)
+		require.NoError(t, err)
+
+		out := val.LookupPath(cue.ParsePath("result.out"))
+		s, err := out.String()
+		require.NoError(t, err)
+		require.Equal(t, "HELLO", s)
+	})
+
+	t.Run("test type validation", func(t *testing.T) {
+		packagePath := "test/types"
+		packageObj := &unstructured.Unstructured{
+			Object: map[string]interface{}{
+				"apiVersion": "cue.oam.dev/v1alpha1",
+				"kind":       "Package",
+				"metadata": map[string]interface{}{
+					"name":      "test-package",
+					"namespace": "default",
+				},
+				"spec": map[string]interface{}{
+					"path": packagePath,
+					"provider": map[string]interface{}{
+						"endpoint": "",
+						"protocol": "",
+					},
+					"templates": map[string]interface{}{
+						"test/types": strings.TrimSpace(`
+							package types
+
+							#AWSRegion: =~"^[a-z]{2,3}-[a-z]+-\\d+$"
+						`),
+					},
+				},
+			},
+		}
+		cl := fake.NewClientBuilder().Build()
+		dcl := dynamicfake.NewSimpleDynamicClient(kuberuntime.NewScheme(), packageObj)
+		singleton.KubeClient.Set(cl)
+		singleton.DynamicClient.Set(dcl)
+
+		compiler := cuex.NewCompilerWithDefaultInternalPackages()
+		err := compiler.LoadExternalPackages(context.Background())
+		assert.NoError(t, err)
+
+		cuex.DefaultCompiler.Reload()
+		defer singleton.ReloadClients()
+		defer cuex.DefaultCompiler.Reload()
+
+		tmpl := strings.TrimSpace(`
+			import "test/types"
+
+			parameter: {
+				region: types.#AWSRegion
+			}
+
+			parameter: {
+				region: "us-east-1"
+			}
+				
+			result: parameter.region
+		`)
+
+		val, err := compiler.CompileString(ctx, tmpl)
+		require.NoError(t, err)
+
+		out := val.LookupPath(cue.ParsePath("result"))
+		s, err := out.String()
+		require.NoError(t, err)
+		require.Equal(t, "us-east-1", s)
+	})
 }
