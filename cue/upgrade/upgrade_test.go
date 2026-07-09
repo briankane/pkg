@@ -659,6 +659,55 @@ combined: list1 + list2
 	}
 }
 
+func TestPerFixEnableFlags(t *testing.T) {
+	origList := EnableListArithmeticUpgrade
+	origErr := EnableErrorFieldLabelUpgrade
+	origBool := EnableBoolDefaultNegationUpgrade
+	defer func() {
+		EnableListArithmeticUpgrade = origList
+		EnableErrorFieldLabelUpgrade = origErr
+		EnableBoolDefaultNegationUpgrade = origBool
+	}()
+
+	t.Run("disable error-field-label", func(t *testing.T) {
+		EnableListArithmeticUpgrade = true
+		EnableErrorFieldLabelUpgrade = false
+		EnableBoolDefaultNegationUpgrade = true
+		input := `
+error: "boom"
+`
+		got, err := Upgrade(input, Version{Major: 1, Minor: 11})
+		if err != nil {
+			t.Fatalf("Upgrade() error = %v", err)
+		}
+		if strings.Contains(got, `"error":`) {
+			t.Fatalf("expected error-field-label rewrite disabled, got:\n%s", got)
+		}
+	})
+
+	t.Run("disable bool-default-guard-hazard", func(t *testing.T) {
+		EnableListArithmeticUpgrade = true
+		EnableErrorFieldLabelUpgrade = true
+		EnableBoolDefaultNegationUpgrade = false
+		input := `
+_flag: bool | *false
+if cond {
+	_flag: true
+}
+if !_flag {
+	output: "err"
+}
+`
+		got, err := Upgrade(input, Version{Major: 1, Minor: 11})
+		if err != nil {
+			t.Fatalf("Upgrade() error = %v", err)
+		}
+		if !strings.Contains(got, "_flag: bool | *false") {
+			t.Fatalf("expected bool-default-guard-hazard rewrite disabled, got:\n%s", got)
+		}
+	})
+}
+
 func TestUpgradeFuncIDRequired(t *testing.T) {
 	defer func() {
 		if r := recover(); r == nil {

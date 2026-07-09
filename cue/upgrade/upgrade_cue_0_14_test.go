@@ -723,3 +723,91 @@ if !_flag {
 		})
 	}
 }
+
+// TestUpgradeMultiPassesCombinedScenario exercises several 0.14 compatibility
+// passes in one template to catch downstream interactions between passes.
+func TestUpgradeMultiPassesCombinedScenario(t *testing.T) {
+	origBool := EnableBoolDefaultNegationUpgrade
+	origGeneric := EnableGenericDefaultGuardUpgrade
+	origKeep := EnableKeepValidatorsSingletonUpgrade
+	origEval := EnableEvalv3SelfRefGuardUpgrade
+	origList := EnableListArithmeticUpgrade
+	t.Cleanup(func() {
+		EnableBoolDefaultNegationUpgrade = origBool
+		EnableGenericDefaultGuardUpgrade = origGeneric
+		EnableKeepValidatorsSingletonUpgrade = origKeep
+		EnableEvalv3SelfRefGuardUpgrade = origEval
+		EnableListArithmeticUpgrade = origList
+	})
+	EnableBoolDefaultNegationUpgrade = true
+	EnableGenericDefaultGuardUpgrade = true
+	EnableKeepValidatorsSingletonUpgrade = true
+	EnableEvalv3SelfRefGuardUpgrade = true
+	EnableListArithmeticUpgrade = true
+
+	const input = `
+import "strings"
+
+parameter: {
+	cluster?: string
+	role?: "primary" | "secondary"
+	version?: string
+}
+
+listA: ["a"]
+listB: ["b"]
+combined: strings.Join(listA + listB, "-")
+
+x: >=1 & <=1
+y: x + 1
+
+_mode: string | *""
+if parameter.cluster != _|_ {
+	_mode: "secondary"
+}
+if _mode == "secondary" {
+	route: "secondary"
+}
+
+_isSecondary: bool | *false
+if parameter.role == "secondary" {
+	_isSecondary: true
+}
+if _isSecondary {
+	if parameter.version != _|_ {
+		_error: parameter.version & "version must not be set for a secondary"
+	}
+}
+
+z: *45 | int & {
+	if z < 1 { _|_ & {errorMessage: "z must be >= 1"} }
+}
+`
+
+	upgraded, err := Upgrade(input, Version{Major: 1, Minor: 11})
+	if err != nil {
+		t.Fatalf("Upgrade() error = %v", err)
+	}
+
+	contains := []string{
+		"strings.Join(list.Concat([",
+		"_modeVal: string | *\"\"",
+	}
+	for _, want := range contains {
+		if !strings.Contains(upgraded, want) {
+			t.Fatalf("expected upgraded output to contain %q, got:\n%s", want, upgraded)
+		}
+	}
+	if strings.Contains(upgraded, "z: *45 | int & {") {
+		t.Fatalf("expected evalv3 rewrite, got:\n%s", upgraded)
+	}
+	if strings.Contains(upgraded, ">=1 & <=1") {
+		t.Fatalf("expected keepvalidators singleton concretization, got:\n%s", upgraded)
+	}
+
+	// Ensure the evalv3 self-ref guard still rejects out-of-range values after rewrite.
+	bad := cuecontext.New().CompileString(upgraded + "\nz: 0\n")
+	if bad.Err() == nil && bad.Validate(cue.Concrete(false)) == nil {
+		t.Fatalf("expected z=0 to fail after combined rewrite:\n%s", upgraded)
+	}
+}
