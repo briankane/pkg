@@ -1,5 +1,5 @@
 /*
-Copyright 2024 The KubeVela Authors.
+Copyright 2026 The KubeVela Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -32,6 +32,16 @@ import (
 // EnableCUEVersionCompatibility controls whether EnsureCueVersionCompatibility is applied at
 // render time. Defaults to true. Can be disabled via --enable-cue-version-compatibility=false.
 var EnableCUEVersionCompatibility = true
+
+// Per-fix toggles for shared CUE upgrades.
+var (
+	EnableListArithmeticUpgrade          = true
+	EnableErrorFieldLabelUpgrade         = true
+	EnableBoolDefaultNegationUpgrade     = false
+	EnableGenericDefaultGuardUpgrade     = false
+	EnableKeepValidatorsSingletonUpgrade = false
+	EnableEvalv3SelfRefGuardUpgrade      = false
+)
 
 // GetCurrentVersion is a pluggable version provider. Consuming repos must set this at init
 // time to return their own running version string (e.g. "v1.11.2"). If unset, all registered
@@ -225,6 +235,9 @@ func runUpgrades(cueStr string, target Version) (result string, applied []applie
 	result = cueStr
 	for _, v := range sortedVersions() {
 		for _, u := range upgradeRegistry[v] {
+			if !isUpgradeEnabled(u.id()) {
+				continue
+			}
 			if !u.appliesToTarget(target) {
 				continue
 			}
@@ -250,6 +263,25 @@ func runUpgrades(cueStr string, target Version) (result string, applied []applie
 		result = normalizedResult
 	}
 	return result, applied, nil
+}
+
+func isUpgradeEnabled(id string) bool {
+	switch id {
+	case "list-arithmetic":
+		return EnableListArithmeticUpgrade
+	case "error-field-label":
+		return EnableErrorFieldLabelUpgrade
+	case "bool-default-guard-hazard":
+		return EnableBoolDefaultNegationUpgrade
+	case "generic-default-guard-hazard":
+		return EnableGenericDefaultGuardUpgrade
+	case "keepvalidators-singleton":
+		return EnableKeepValidatorsSingletonUpgrade
+	case "evalv3-selfref-default-guard":
+		return EnableEvalv3SelfRefGuardUpgrade
+	default:
+		return true
+	}
 }
 
 // Upgrade applies all registered upgrades that apply to the given target version.
