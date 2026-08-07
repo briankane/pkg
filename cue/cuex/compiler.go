@@ -33,6 +33,7 @@ import (
 	cueext "github.com/kubevela/pkg/cue/cuex/providers/cue"
 	"github.com/kubevela/pkg/cue/cuex/providers/http"
 	"github.com/kubevela/pkg/cue/cuex/providers/kube"
+	cuexutil "github.com/kubevela/pkg/cue/cuex/providers/util"
 	cuexruntime "github.com/kubevela/pkg/cue/cuex/runtime"
 	"github.com/kubevela/pkg/cue/util"
 	"github.com/kubevela/pkg/util/runtime"
@@ -247,6 +248,7 @@ func NewCompilerWithDefaultInternalPackages() *Compiler {
 		http.Package,
 		kube.Package,
 		cueext.Package,
+		cuexutil.Package,
 	)
 }
 
