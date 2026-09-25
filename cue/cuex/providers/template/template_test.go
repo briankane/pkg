@@ -18,6 +18,7 @@ package template_test
 
 import (
 	"context"
+	"encoding/json"
 	"sort"
 	"strings"
 	"testing"
@@ -32,8 +33,16 @@ import (
 
 func render(t *testing.T, ctx context.Context, tmpl string, data map[string]any) (string, error) {
 	t.Helper()
+	// $params.data arrives as it came off the wire, so a test hands it over
+	// the same way rather than as a decoded map
+	var raw json.RawMessage
+	if data != nil {
+		bs, err := json.Marshal(data)
+		require.NoError(t, err)
+		raw = bs
+	}
 	out, err := template.Render(ctx, &providers.Params[template.RenderParams]{
-		Params: template.RenderParams{Template: tmpl, Data: data},
+		Params: template.RenderParams{Template: tmpl, Data: raw},
 	})
 	if err != nil {
 		return "", err
@@ -119,10 +128,19 @@ func TestRenderIsDeterministic(t *testing.T) {
 // TestNonDeterministicHelpersAreGone: each of these would make a definition
 // render differently every reconcile, and env would put the controller's own
 // environment into a user's manifest.
+//
+// The date family is the one worth naming. sprig's date takes a format and a
+// time, but anything that is not a time or an int falls through to the current
+// time, and what comes out of a CUE value is a string. So date on a parameter
+// silently answers with today rather than with what it was given.
 func TestNonDeterministicHelpersAreGone(t *testing.T) {
 	funcs := template.Funcs()
 	for _, name := range []string{
-		"now", "ago", "env", "expandenv", "getHostByName", "randInt",
+		"now", "ago",
+		"date", "dateInZone", "date_in_zone", "dateModify", "date_modify",
+		"htmlDate", "htmlDateInZone", "toDate", "mustToDate", "durationRound",
+		"env", "expandenv", "getHostByName",
+		"randInt", "randAlpha", "randAlphaNum", "randAscii", "randNumeric", "randBytes", "uuidv4",
 		"osBase", "osClean", "osDir", "osExt", "osIsAbs",
 	} {
 		_, found := funcs[name]
@@ -134,16 +152,40 @@ func TestNonDeterministicHelpersAreGone(t *testing.T) {
 	}
 }
 
+// helpers is what a template may call, as reviewed. A count alone would pass a
+// bump that took one away and gave another back, which is the very change that
+// would put a clock-reading helper within reach under a new name.
+var helpers = []string{
+	"add", "add1", "adler32sum", "all", "any", "append", "atoi", "b32dec",
+	"b32enc", "b64dec", "b64enc", "base", "biggest", "cat", "ceil", "chunk",
+	"clean", "coalesce", "compact", "concat", "contains", "deepEqual", "default", "dict",
+	"dig", "dir", "div", "duration", "empty", "ext", "fail", "first",
+	"float64", "floor", "fromJson", "get", "has", "hasKey", "hasPrefix", "hasSuffix",
+	"hello", "indent", "initial", "int", "int64", "isAbs", "join", "keys",
+	"kindIs", "kindOf", "last", "list", "lower", "max", "maxf", "min",
+	"minf", "mod", "mul", "mustAppend", "mustChunk", "mustCompact", "mustDateModify", "mustFirst",
+	"mustFromJson", "mustHas", "mustInitial", "mustLast", "mustPrepend", "mustPush", "mustRegexFind", "mustRegexFindAll", "mustRegexMatch",
+	"mustRegexReplaceAll", "mustRegexReplaceAllLiteral", "mustRegexSplit", "mustRest", "mustReverse", "mustSlice", "mustToJson", "mustToPrettyJson",
+	"mustToRawJson", "mustUniq", "mustWithout", "must_date_modify", "nindent", "omit", "pick", "pluck",
+	"plural", "prepend", "push", "quote", "regexFind", "regexFindAll", "regexMatch", "regexQuoteMeta", "regexReplaceAll",
+	"regexReplaceAllLiteral", "regexSplit", "repeat", "replace", "rest", "reverse", "round", "seq",
+	"set", "sha1sum", "sha256sum", "slice", "sortAlpha", "split", "splitList", "splitn",
+	"squote", "sub", "substr", "ternary", "title", "toDecimal", "toJson", "toPrettyJson",
+	"toRawJson", "toString", "toStrings", "trim", "trimAll", "trimPrefix", "trimSuffix", "trimall",
+	"trunc", "tuple", "typeIs", "typeIsLike", "typeOf", "uniq", "unixEpoch", "unset",
+	"until", "untilStep", "upper", "urlJoin", "urlParse", "values", "without",
+}
+
 // TestTheHelperListIsPinned holds the set to what was reviewed. A dependency
-// bump that adds a helper fails here, which is the point: the new one has to
-// be looked at before a definition can reach it.
+// bump that changes one fails here, which is the point: it has to be looked at
+// before a definition can reach it.
 func TestTheHelperListIsPinned(t *testing.T) {
 	names := make([]string, 0, len(template.Funcs()))
 	for name := range template.Funcs() {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	require.Equal(t, 155, len(names),
-		"the helper list changed, review the additions and update this count:\n%s",
+	require.Equal(t, helpers, names,
+		"the helper list changed, review it and update the list above:\n%s",
 		strings.Join(names, " "))
 }

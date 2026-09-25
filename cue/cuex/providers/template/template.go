@@ -44,8 +44,10 @@ import (
 type RenderParams struct {
 	// Template is the Go text/template to render.
 	Template string `json:"template"`
-	// Data is anything else the template should reach, under .data
-	Data map[string]any `json:"data,omitempty"`
+	// Data is anything else the template should reach, under .data. It is
+	// held raw so the numbers in it can be decoded exactly, which decoding
+	// straight into map[string]any would not do.
+	Data json.RawMessage `json:"data,omitempty"`
 }
 
 // RenderVars .
@@ -81,22 +83,50 @@ func Render(ctx context.Context, in *RenderVars) (*RenderReturns, error) {
 		return nil, fmt.Errorf("template will not parse: %w", err)
 	}
 
-	data := map[string]any{"data": orEmpty(in.Params.Data)}
-	if root, ok := cuexruntime.RootFrom(ctx); ok {
-		for _, name := range ambient {
-			data[name] = orEmpty(decodeField(root, name))
-		}
-	} else {
-		for _, name := range ambient {
+	own, err := decodeJSON(in.Params.Data)
+	if err != nil {
+		return nil, fmt.Errorf("data will not decode: %w", err)
+	}
+	data := map[string]any{"data": own}
+	root, rooted := cuexruntime.RootFrom(ctx)
+	for _, name := range ambient {
+		if rooted {
+			data[name] = decodeField(root, name)
+		} else {
 			data[name] = map[string]any{}
 		}
 	}
 
-	var out bytes.Buffer
-	if err = parsed.Execute(&out, data); err != nil {
+	out := &boundedWriter{ctx: ctx, left: maxRendered}
+	if err = parsed.Execute(out, data); err != nil {
 		return nil, fmt.Errorf("template will not render: %w", err)
 	}
-	return &RenderReturns{Returns: out.String()}, nil
+	return &RenderReturns{Returns: out.buf.String()}, nil
+}
+
+// maxRendered bounds what one render may produce. A template loops over what
+// it is given, and what it is given comes from a user, so a run that would not
+// stop has to be stopped. A config file is thousands of bytes, not millions.
+const maxRendered = 1 << 20
+
+// boundedWriter stops a render that will not stop itself, either because the
+// time for it has gone or because it has written more than anything real
+// would. Execute is not handed the context, so this is where both are seen.
+type boundedWriter struct {
+	ctx  context.Context
+	buf  bytes.Buffer
+	left int
+}
+
+func (in *boundedWriter) Write(p []byte) (int, error) {
+	if err := in.ctx.Err(); err != nil {
+		return 0, fmt.Errorf("gave up rendering: %w", err)
+	}
+	if len(p) > in.left {
+		return 0, fmt.Errorf("rendered more than %d bytes, which is not a config file", maxRendered)
+	}
+	in.left -= len(p)
+	return in.buf.Write(p)
 }
 
 // decodeField reads one of the ambient fields out of the value the call sits
@@ -107,51 +137,137 @@ func Render(ctx context.Context, in *RenderVars) (*RenderReturns, error) {
 func decodeField(root cue.Value, name string) map[string]any {
 	field := root.LookupPath(cue.ParsePath(name))
 	if !field.Exists() {
-		return nil
+		return map[string]any{}
 	}
-	bs, err := field.MarshalJSON()
-	if err != nil {
-		return nil
+	if whole, err := decodeValue(field); err == nil {
+		return whole
 	}
+	// A block is marshalled whole where it can be, and field by field where it
+	// cannot. One field a call has not filled in yet fails the whole marshal,
+	// and reading that as "there is no parameter block" would hide every
+	// sibling that was ready and blame whichever one the template asked for.
 	out := map[string]any{}
-	if err = json.Unmarshal(bs, &out); err != nil {
-		return nil
+	it, err := field.Fields()
+	if err != nil {
+		return out
+	}
+	for it.Next() {
+		bs, err := it.Value().MarshalJSON()
+		if err != nil {
+			continue
+		}
+		var one any
+		if err = decodeInto(bs, &one); err == nil {
+			out[it.Label()] = one
+		}
 	}
 	return out
 }
 
-func orEmpty(in map[string]any) map[string]any {
-	if in == nil {
-		return map[string]any{}
+func decodeValue(v cue.Value) (map[string]any, error) {
+	bs, err := v.MarshalJSON()
+	if err != nil {
+		return nil, err
 	}
-	return in
+	out := map[string]any{}
+	if err = decodeInto(bs, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
-// nonDeterministic are the helpers a definition must not reach.
+func decodeJSON(raw json.RawMessage) (map[string]any, error) {
+	out := map[string]any{}
+	if len(raw) == 0 {
+		return out, nil
+	}
+	if err := decodeInto(raw, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// decodeInto reads JSON keeping whole numbers whole. Decoding into any makes
+// every number a float64, and a template prints that with %v, so a memory
+// limit of 1073741824 reaches a config file as 1.073741824e+09 and whatever
+// reads it fails.
+func decodeInto(bs []byte, into any) error {
+	dec := json.NewDecoder(bytes.NewReader(bs))
+	dec.UseNumber()
+	if err := dec.Decode(into); err != nil {
+		return err
+	}
+	switch target := into.(type) {
+	case *map[string]any:
+		*target, _ = exactNumbers(*target).(map[string]any)
+	case *any:
+		*target = exactNumbers(*target)
+	}
+	return nil
+}
+
+// exactNumbers turns what UseNumber held back into the narrowest thing that
+// prints and calculates the way the template author meant.
+func exactNumbers(v any) any {
+	switch node := v.(type) {
+	case map[string]any:
+		for k, each := range node {
+			node[k] = exactNumbers(each)
+		}
+	case []any:
+		for i, each := range node {
+			node[i] = exactNumbers(each)
+		}
+	case json.Number:
+		if i, err := node.Int64(); err == nil {
+			return i
+		}
+		if f, err := node.Float64(); err == nil {
+			return f
+		}
+		return node.String()
+	}
+	return v
+}
+
+// alsoNotRepeatable are the helpers slim-sprig's own hermetic set leaves in
+// but a definition still must not reach.
 //
-// A rendered manifest is compared against the last one to find what drifted,
-// so a template that reads the clock, the environment or a random number
-// renders differently every time and the application never settles. Reading
-// the controller's own environment would also put whatever is in it into a
-// user's manifest. The os path helpers are here because they follow the
-// separator of whatever is running them, so a definition would render one way
-// in the controller and another in the CLI.
-var nonDeterministic = []string{
-	"now", "ago",
-	"env", "expandenv",
-	"getHostByName",
+// A rendered manifest is compared against the last one to see what drifted, so
+// a helper that answers differently twice stops an application settling. ago
+// reads the clock, randInt is random, and durationRound reaches for the
+// current time when handed one. toDate reads in whatever zone is running it,
+// and the os path helpers follow whatever separator is, so a definition would
+// render one way in the controller and another in the CLI.
+var alsoNotRepeatable = []string{
+	"ago",
 	"randInt",
+	"durationRound",
+	"toDate", "mustToDate",
 	"osBase", "osClean", "osDir", "osExt", "osIsAbs",
 }
 
-// Funcs is what a template may call. It is slim-sprig less the helpers above,
-// and is exported so a test can hold it to a known list: a dependency bump
-// that adds a helper should be looked at rather than picked up in silence.
-func Funcs() template.FuncMap {
-	funcs := sprig.TxtFuncMap()
-	for _, name := range nonDeterministic {
-		delete(funcs, name)
+// funcs is built once: sprig copies its whole map on every call and
+// text/template copies it again, which is not worth paying per render.
+//
+// The base is slim-sprig's hermetic set rather than a list kept here. It names
+// what is not repeatable and goes on naming it as the library grows, and it
+// already covers the whole date family - where date, handed the string a CUE
+// value gives it, quietly answers with the current time instead.
+var funcs = buildFuncs()
+
+func buildFuncs() template.FuncMap {
+	built := sprig.HermeticTxtFuncMap()
+	for _, name := range alsoNotRepeatable {
+		delete(built, name)
 	}
+	return built
+}
+
+// Funcs is what a template may call, exported so a test can hold it to a known
+// list: a dependency bump that changes one should be looked at rather than
+// picked up in silence.
+func Funcs() template.FuncMap {
 	return funcs
 }
 
