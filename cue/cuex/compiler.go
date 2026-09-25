@@ -33,6 +33,7 @@ import (
 	cueext "github.com/kubevela/pkg/cue/cuex/providers/cue"
 	"github.com/kubevela/pkg/cue/cuex/providers/http"
 	"github.com/kubevela/pkg/cue/cuex/providers/kube"
+	tmpl "github.com/kubevela/pkg/cue/cuex/providers/template"
 	cuexutil "github.com/kubevela/pkg/cue/cuex/providers/util"
 	cuexruntime "github.com/kubevela/pkg/cue/cuex/runtime"
 	"github.com/kubevela/pkg/cue/util"
@@ -206,7 +207,10 @@ func (in *Compiler) Resolve(ctx context.Context, value cue.Value) (cue.Value, er
 		if f == nil {
 			return newValue, ProviderFnNotFoundErr{Provider: prdName, Fn: fn}
 		}
-		val, err := f.Call(ctx, *next)
+		// the function is handed its own call and nothing else, so the value
+		// it sits in travels alongside for the ones that need what surrounds
+		// them rather than only what they were passed
+		val, err := f.Call(cuexruntime.WithRoot(ctx, newValue), *next)
 		if err != nil {
 			return newValue, NewFunctionCallError(val, err)
 		}
@@ -249,6 +253,7 @@ func NewCompilerWithDefaultInternalPackages() *Compiler {
 		kube.Package,
 		cueext.Package,
 		cuexutil.Package,
+		tmpl.Package,
 	)
 }
 
