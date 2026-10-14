@@ -166,6 +166,9 @@ func native(v ref.Val) interface{} {
 			out[fmt.Sprintf("%v", native(k))] = native(val)
 		}
 		return out
+	case types.Null:
+		// Its Value() is the protobuf enum NullValue, which marshals as 0.
+		return nil
 	default:
 		return v.Value()
 	}

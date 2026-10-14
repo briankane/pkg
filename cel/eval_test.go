@@ -153,6 +153,30 @@ func TestEval(t *testing.T) {
 	}
 }
 
+// A null stays null however it is reached, read from the input or built by CEL,
+// so a missing value is not mistaken for zero.
+func TestEvalKeepsNull(t *testing.T) {
+	env := fixture.DynEnv()
+	in := map[string]interface{}{
+		"source": map[string]interface{}{"file": map[string]interface{}{"found": false, "content": nil}},
+	}
+	for expr, want := range map[string]interface{}{
+		`null`:                nil,
+		`source.file.content`: nil,
+		`source.file`:         map[string]interface{}{"found": false, "content": nil},
+		`{"content": null}`:   map[string]interface{}{"content": nil},
+		`[null, 1]`:           []interface{}{nil, int64(1)},
+		`source["file"]`:      map[string]interface{}{"found": false, "content": nil},
+	} {
+		got, err := fixture.Eval(env, expr, in)
+		require.NoError(t, err, expr)
+		require.Equal(t, want, got, expr)
+	}
+	got, err := fixture.EvalProperty(env, `$(source.file.content)`, in)
+	require.NoError(t, err)
+	require.Nil(t, got, "a lone expression keeps its null")
+}
+
 // Interpolation survives the swap to CEL, because the `$( )` splitting was never
 // part of the expression language.
 //
