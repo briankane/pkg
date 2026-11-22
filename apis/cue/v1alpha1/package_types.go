@@ -38,7 +38,69 @@ type PackageSpec struct {
 	Path      string            `json:"path"`
 	Provider  *Provider         `json:"provider,omitempty"`
 	Templates map[string]string `json:"templates"`
+	// Restrictions limits who may call the package's functions. Absent means
+	// anyone who can import it.
+	// +optional
+	Restrictions *PackageRestrictions `json:"restrictions,omitempty"`
 }
+
+// PackageRestrictions limits the calls to a package's functions by the namespace
+// of whatever makes the call, a definition or a Package, and by who last wrote it.
+type PackageRestrictions struct {
+	// CallRule applies to every call to the package.
+	CallRule `json:",inline"`
+
+	// Functions narrow the rule for some functions. For each of a function's
+	// $groups, the first entry matching the function or that group applies; a
+	// function in no group takes the first entry matching its name.
+	// +optional
+	Functions []FunctionRestriction `json:"functions,omitempty"`
+}
+
+// FunctionRestriction is a rule for the functions it matches.
+type FunctionRestriction struct {
+	// Match lists functions by their #do, or a group as group:<name>. Empty
+	// matches every function.
+	// +optional
+	Match []string `json:"match,omitempty"`
+
+	CallRule `json:",inline"`
+}
+
+// CallRule is who may make a call. Every field that is set must pass.
+type CallRule struct {
+	// Namespaces the caller's namespace must match, by name or path.Match glob.
+	// +optional
+	Namespaces []string `json:"namespaces,omitempty"`
+
+	// NamespaceSelector the caller's namespace labels must match.
+	// +optional
+	NamespaceSelector *metav1.LabelSelector `json:"namespaceSelector,omitempty"`
+
+	// RequireRoles are roles any one of whose members may call. The caller's
+	// writer is a member when a ClusterRoleBinding, or a RoleBinding in the
+	// Package's namespace, binds the role to its user, one of its groups or its
+	// service account.
+	// +optional
+	RequireRoles []RoleRef `json:"requireRoles,omitempty"`
+
+	// RequireGrant requires the caller's writer to hold the verb "call" on
+	// packages in cue.oam.dev, named for the package, the function's group or the
+	// function, asked in the Package's namespace.
+	// +optional
+	RequireGrant bool `json:"requireGrant,omitempty"`
+}
+
+// RoleRef names a ClusterRole, or a Role in the restricted object's namespace.
+type RoleRef struct {
+	// +kubebuilder:validation:Enum=Role;ClusterRole
+	Kind string `json:"kind"`
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+}
+
+// String is the role as Kind/name.
+func (r RoleRef) String() string { return r.Kind + "/" + r.Name }
 
 // ProviderProtocol the protocol type for external Provider
 type ProviderProtocol string
