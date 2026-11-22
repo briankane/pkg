@@ -43,4 +43,9 @@ func TestOwner(t *testing.T) {
 		got, _ := cuex.OwnerFrom(ctx)
 		require.Equal(t, "child", got.Name)
 	})
+	t.Run("an empty owner takes the outer one away", func(t *testing.T) {
+		ctx := cuex.WithOwner(context.Background(), cuex.Owner{Kind: "ComponentDefinition", Namespace: "team-a", Name: "web"})
+		_, ok := cuex.OwnerFrom(cuex.WithOwner(ctx, cuex.Owner{}))
+		require.False(t, ok)
+	})
 }

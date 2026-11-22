@@ -40,7 +40,8 @@ type Writer struct {
 type ownerKey struct{}
 
 // WithOwner returns ctx with owner as its compilations' owner, replacing any
-// owner ctx already carries.
+// owner ctx already carries. An empty owner leaves ctx with none, for a
+// compilation inside another's that belongs to no definition.
 func WithOwner(ctx context.Context, owner Owner) context.Context {
 	return context.WithValue(ctx, ownerKey{}, owner)
 }
@@ -48,5 +49,8 @@ func WithOwner(ctx context.Context, owner Owner) context.Context {
 // OwnerFrom returns the owner of ctx's compilations, and whether it has one.
 func OwnerFrom(ctx context.Context) (Owner, bool) {
 	owner, ok := ctx.Value(ownerKey{}).(Owner)
-	return owner, ok
+	if !ok || owner.Name == "" {
+		return Owner{}, false
+	}
+	return owner, true
 }
