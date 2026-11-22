@@ -105,6 +105,11 @@ type Compiler struct {
 	// packageRevealGraphs holds what each package's syntax says about which
 	// calls can reveal another; see revealers.
 	packageRevealGraphs sync.Map
+
+	// CallCheck, when set, decides whether each call may run, before its
+	// provider reads it. When it is not, a call to a Package with restrictions
+	// is refused, since nothing would decide who may make it.
+	CallCheck CallCheck
 }
 
 // CompileString compile given cue string into cue.Value
@@ -633,6 +638,7 @@ func (in *Compiler) resolve(ctx context.Context, value cue.Value, mayReveal bool
 	executed := map[string]bool{}
 	waitingFor := &callWaits{of: map[string][]string{}, analysis: analysis}
 	providers := in.PackageManager.GetProviders()
+	ctx = in.gated(ctx, providers)
 	for {
 		if pastDeadline(ctx) {
 			return newValue, ResolveTimeoutErr{}
@@ -1164,6 +1170,9 @@ func runTogether(
 			return nil, ProviderFnNotFoundErr{Provider: call.provider, Fn: call.fn}
 		}
 		fns[i] = concurrent
+		if err := checkCall(ctx, call); err != nil {
+			return nil, NewFunctionCallError(call.value, err)
+		}
 		if decoded[i], err = concurrent.Decode(call.value); err != nil {
 			return nil, NewFunctionCallError(call.value, err)
 		}
@@ -1241,6 +1250,9 @@ func runTogether(
 // building and taking apart a value neither of them wanted: for a pass of
 // eight calls, eight times the work for the same answer.
 func callProvider(ctx context.Context, fn cuexruntime.ProviderFn, call pendingCall) (any, error) {
+	if err := checkCall(ctx, call); err != nil {
+		return nil, NewFunctionCallError(call.value, err)
+	}
 	if returning, ok := fn.(cuexruntime.ResultProviderFn); ok {
 		ret, err := returning.CallForResult(ctx, call.value)
 		if err != nil {

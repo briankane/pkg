@@ -233,6 +233,7 @@ func (in *Compiler) prepassRound(
 		return 0, 0, nil, false
 	}
 	providers := in.PackageManager.GetProviders()
+	ctx = in.gated(ctx, providers)
 
 	loops, calls := 0, 0
 	for _, decl := range f.Decls {

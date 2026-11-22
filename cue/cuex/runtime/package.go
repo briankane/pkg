@@ -17,7 +17,9 @@ limitations under the License.
 package runtime
 
 import (
+	"cuelang.org/go/cue/ast"
 	"cuelang.org/go/cue/build"
+	"cuelang.org/go/cue/literal"
 
 	"github.com/kubevela/pkg/apis/cue/v1alpha1"
 	"github.com/kubevela/pkg/cue/util"
@@ -74,7 +76,14 @@ func NewInternalPackage(name string, template string, fns map[string]ProviderFn)
 type externalPackage struct {
 	src     *v1alpha1.Package
 	imports []*build.Instance
+	groups  map[string][]string
 }
+
+// Source implements FromPackage.
+func (in *externalPackage) Source() *v1alpha1.Package { return in.src }
+
+// GroupsOf implements FromPackage.
+func (in *externalPackage) GroupsOf(do string) []string { return in.groups[do] }
 
 func (in *externalPackage) GetProviderFn(do string) ProviderFn {
 	if in.src.Spec.Provider == nil {
@@ -107,13 +116,68 @@ func (in *externalPackage) GetImports() []*build.Instance {
 
 var _ Package = &externalPackage{}
 
-// NewExternalPackage create Package based on given CRD object
+var _ FromPackage = &externalPackage{}
+
+// NewExternalPackage create Package based on given CRD object. Its files are
+// named by FileOf, so a value's position says which Package wrote it.
 func NewExternalPackage(src *v1alpha1.Package) (Package, error) {
 	pkg := &externalPackage{src: src}
-	bi, err := util.BuildImport(pkg.GetPath(), src.Spec.Templates)
+	templates := make(map[string]string, len(src.Spec.Templates))
+	for file, template := range src.Spec.Templates {
+		templates[FileOf(src.Namespace, src.Name, file)] = template
+	}
+	bi, err := util.BuildImport(pkg.GetPath(), templates)
 	if err != nil {
 		return nil, err
 	}
 	pkg.imports = []*build.Instance{bi}
+	pkg.groups = groupsOf(bi.Files)
 	return pkg, nil
+}
+
+// groupsOf reads each function's $groups, by its #do, from the top-level
+// definitions of a Package's files. A $groups that is not a list of string
+// literals is ignored.
+func groupsOf(files []*ast.File) map[string][]string {
+	out := map[string][]string{}
+	for _, f := range files {
+		for _, d := range f.Decls {
+			field, ok := d.(*ast.Field)
+			if !ok {
+				continue
+			}
+			st, ok := field.Value.(*ast.StructLit)
+			if !ok {
+				continue
+			}
+			var do string
+			var groups []string
+			for _, el := range st.Elts {
+				inner, ok := el.(*ast.Field)
+				if !ok {
+					continue
+				}
+				switch label, _, _ := ast.LabelName(inner.Label); label {
+				case "#do":
+					if lit, ok := inner.Value.(*ast.BasicLit); ok {
+						do, _ = literal.Unquote(lit.Value)
+					}
+				case "$groups":
+					if list, ok := inner.Value.(*ast.ListLit); ok {
+						for _, x := range list.Elts {
+							if lit, ok := x.(*ast.BasicLit); ok {
+								if g, err := literal.Unquote(lit.Value); err == nil {
+									groups = append(groups, g)
+								}
+							}
+						}
+					}
+				}
+			}
+			if do != "" && len(groups) > 0 {
+				out[do] = groups
+			}
+		}
+	}
+	return out
 }

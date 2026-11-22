@@ -18,9 +18,12 @@ package runtime
 
 import (
 	"context"
+	"strings"
 
 	"cuelang.org/go/cue"
 	"cuelang.org/go/cue/build"
+
+	"github.com/kubevela/pkg/apis/cue/v1alpha1"
 )
 
 // ProviderFn the function interface to process cue values
@@ -47,3 +50,34 @@ type Package interface {
 	Provider
 	CUETemplater
 }
+
+// FromPackage is a provider made from a Package object, whose restrictions
+// decide who may call it.
+type FromPackage interface {
+	// Source is the Package the provider was made from.
+	Source() *v1alpha1.Package
+	// GroupsOf is the $groups of the function whose #do is do.
+	GroupsOf(do string) []string
+}
+
+// FileOf names a Package's CUE file uniquely across Packages, so the file a value
+// came from says which Package wrote it.
+func FileOf(namespace, name, file string) string {
+	return filePrefix + namespace + "/" + name + "/" + file
+}
+
+// PackageOfFile is the namespace and name of the Package that wrote file, and
+// whether a Package did.
+func PackageOfFile(file string) (namespace, name string, ok bool) {
+	rest, ok := strings.CutPrefix(file, filePrefix)
+	if !ok {
+		return "", "", false
+	}
+	parts := strings.SplitN(rest, "/", 3)
+	if len(parts) != 3 {
+		return "", "", false
+	}
+	return parts[0], parts[1], true
+}
+
+const filePrefix = "package:"
