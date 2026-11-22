@@ -18,6 +18,7 @@ package access_test
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"testing"
 	"time"
@@ -50,21 +51,29 @@ func TestMember(t *testing.T) {
 		&rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: "wide"}, RoleRef: ref("ClusterRole", "cluster-admin"), Subjects: []rbacv1.Subject{user("root")}},
 		&rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: "carol", Namespace: system}, RoleRef: ref("ClusterRole", "admins"), Subjects: []rbacv1.Subject{user("carol"), sa}},
 		&rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: "dave", Namespace: "team-a"}, RoleRef: ref("ClusterRole", "admins"), Subjects: []rbacv1.Subject{user("dave")}},
+		&rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: "frank", Namespace: system}, RoleRef: ref("Role", "admins"), Subjects: []rbacv1.Subject{user("frank")}},
+		&rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: "gina", Namespace: system}, RoleRef: ref("Role", "callers"), Subjects: []rbacv1.Subject{user("gina")}},
+		&rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: "hugh", Namespace: "team-a"}, RoleRef: ref("Role", "callers"), Subjects: []rbacv1.Subject{user("hugh")}},
 	).Build()
 	admins := []v1alpha1.RoleRef{{Kind: "ClusterRole", Name: "admins"}}
+	callers := []v1alpha1.RoleRef{{Kind: "Role", Name: "callers"}}
 	for name, tc := range map[string]struct {
-		w    cuex.Writer
-		want bool
+		w     cuex.Writer
+		roles []v1alpha1.RoleRef
+		want  bool
 	}{
-		"a group bound cluster-wide":              {cuex.Writer{User: "alice", Groups: []string{"leads"}}, true},
-		"a user bound where the object lives":     {cuex.Writer{User: "carol"}, true},
-		"a service account bound there":           {cuex.Writer{User: "system:serviceaccount:argocd:platform"}, true},
-		"a binding in another namespace":          {cuex.Writer{User: "dave"}, false},
-		"a binding to another role, however wide": {cuex.Writer{User: "root"}, false},
-		"no binding": {cuex.Writer{User: "bob"}, false},
+		"a group bound cluster-wide":                 {cuex.Writer{User: "alice", Groups: []string{"leads"}}, admins, true},
+		"a user bound where the object lives":        {cuex.Writer{User: "carol"}, admins, true},
+		"a service account bound there":              {cuex.Writer{User: "system:serviceaccount:argocd:platform"}, admins, true},
+		"a binding in another namespace":             {cuex.Writer{User: "dave"}, admins, false},
+		"a binding to another role, however wide":    {cuex.Writer{User: "root"}, admins, false},
+		"a Role of the same name as the ClusterRole": {cuex.Writer{User: "frank"}, admins, false},
+		"a Role bound where the object lives":        {cuex.Writer{User: "gina"}, callers, true},
+		"a Role of that name in another namespace":   {cuex.Writer{User: "hugh"}, callers, false},
+		"no binding": {cuex.Writer{User: "bob"}, admins, false},
 	} {
 		t.Run(name, func(t *testing.T) {
-			ok, err := access.Member(context.Background(), cli, tc.w, admins, system)
+			ok, err := access.Member(context.Background(), cli, tc.w, tc.roles, system)
 			require.NoError(t, err)
 			require.Equal(t, tc.want, ok)
 		})
@@ -114,6 +123,42 @@ func TestKubeAuthorizer(t *testing.T) {
 		_, err = auth.MayCall(ctx, lead, system, names)
 		require.NoError(t, err)
 		require.Greater(t, len(reviews), before, "not asked again after the TTL")
+	})
+	t.Run("an answer is kept to the writer, groups and namespace it was given for", func(t *testing.T) {
+		_, err := auth.MayCall(ctx, lead, system, names)
+		require.NoError(t, err)
+		for _, ask := range []struct {
+			name string
+			w    cuex.Writer
+			ns   string
+			want bool
+		}{
+			{"another user in the same groups", cuex.Writer{User: "bob", Groups: lead.Groups}, system, true},
+			{"the same user in fewer groups", cuex.Writer{User: lead.User}, system, false},
+			{"another namespace", lead, "team-a", false},
+		} {
+			before := len(reviews)
+			ok, err := auth.MayCall(ctx, ask.w, ask.ns, names)
+			require.NoError(t, err, ask.name)
+			require.Greater(t, len(reviews), before, "%s answered from another's memo", ask.name)
+			require.Equal(t, ask.want, ok, ask.name)
+		}
+	})
+	t.Run("a review the cluster cannot answer is an error, and is not remembered", func(t *testing.T) {
+		var tries int
+		failing := fake.NewClientBuilder().WithScheme(scheme).WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(context.Context, client.WithWatch, client.Object, ...client.CreateOption) error {
+				tries++
+				return errors.New("connection refused")
+			},
+		}).Build()
+		down := &access.KubeAuthorizer{Reader: failing, Reviewer: failing, TTL: time.Minute, Now: func() time.Time { return now }}
+		for range 2 {
+			ok, err := down.MayCall(ctx, lead, system, names)
+			require.ErrorContains(t, err, "connection refused")
+			require.False(t, ok)
+		}
+		require.Equal(t, 2, tries, "a failure was answered from the memo")
 	})
 	t.Run("a namespace's labels", func(t *testing.T) {
 		labels, err := auth.NamespaceLabels(ctx, "team-a")
